@@ -133,6 +133,21 @@ class Config:
             self._save()
             return True
 
+    # -- Interactive /login flow state (persisted so it survives serverless restarts) --
+
+    def get_login_flow(self, chat_id: int) -> dict | None:
+        return self._data.setdefault("login_flows", {}).get(str(chat_id))
+
+    def set_login_flow(self, chat_id: int, flow: dict) -> None:
+        with self._lock:
+            self._data.setdefault("login_flows", {})[str(chat_id)] = flow
+            self._save()
+
+    def clear_login_flow(self, chat_id: int) -> None:
+        with self._lock:
+            if self._data.setdefault("login_flows", {}).pop(str(chat_id), None) is not None:
+                self._save()
+
     # -- Per-chat interface language ---------------------------------------------------
 
     def get_language(self, chat_id: int) -> str:

@@ -65,7 +65,7 @@ provides AI-powered conversations.
 | `/stop` | Unsubscribe from the daily digest |
 | `/addevent <date> <time> <title> [@ place]` | Add an event (`/addevent tomorrow 14:00-15:30 Meeting @ IT STEP`) |
 | `/addnote [date] <text>` | Add a note (date defaults to today) |
-| `/login <email> <password>` | Connect your own calendar account to this chat |
+| `/login` | Connect your calendar account step by step: the bot asks for the email, then the password, and deletes each message immediately so credentials never stay visible (one-line `/login <email> <password>` still works) |
 | `/register <email> <password> [name]` | Create a new calendar account and connect it |
 | `/account` | Show which calendar account this chat uses |
 | `/logout` | Disconnect the personal account (back to the shared one) |

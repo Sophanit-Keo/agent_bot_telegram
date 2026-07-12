@@ -43,14 +43,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": (
             "🔐 <b>Sign in to your calendar first</b>\n"
             "Before using the bot you must connect a Calendar account:\n"
-            "• /login &lt;email&gt; &lt;password&gt; — existing account\n"
+            "• /login — sign in step by step (I ask email, then password)\n"
             "• /register &lt;email&gt; &lt;password&gt; [name] — create a new one\n"
-            "⚠️ Do this in a private chat — I delete your message right after."
+            "⚠️ Do this in a private chat — I delete your messages right away."
         ),
         "km": (
             "🔐 <b>សូមចូលគណនីប្រតិទិនជាមុនសិន</b>\n"
             "មុននឹងប្រើ bot អ្នកត្រូវភ្ជាប់គណនីប្រតិទិន៖\n"
-            "• /login &lt;email&gt; &lt;password&gt; — គណនីដែលមានស្រាប់\n"
+            "• /login — ចូលគណនីជាជំហានៗ (ខ្ញុំសួរអ៊ីមែល បន្ទាប់មកពាក្យសម្ងាត់)\n"
             "• /register &lt;email&gt; &lt;password&gt; [ឈ្មោះ] — បង្កើតគណនីថ្មី\n"
             "⚠️ សូមធ្វើនៅក្នុងការជជែកឯកជន — ខ្ញុំនឹងលុបសាររបស់អ្នកភ្លាមៗ។"
         ),
@@ -73,7 +73,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "<b>Your calendar (dynamic input)</b>\n"
             "/addevent &lt;date&gt; &lt;time&gt; &lt;title&gt; [@ place] — add an event\n"
             "/addnote [date] &lt;text&gt; — add a note\n"
-            "/login &lt;email&gt; &lt;password&gt; — sign in to YOUR calendar account\n"
+            "/login — sign in to YOUR calendar account (asks email, then password)\n"
             "/register &lt;email&gt; &lt;password&gt; [name] — create a new account\n"
             "/account — who is signed in · /logout — sign out\n\n"
             "<b>AI chat</b>\n"
@@ -110,7 +110,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "<b>ប្រតិទិនរបស់អ្នក (បញ្ចូលទិន្នន័យ)</b>\n"
             "/addevent &lt;ថ្ងៃ&gt; &lt;ម៉ោង&gt; &lt;ចំណងជើង&gt; [@ ទីកន្លែង] — បន្ថែមព្រឹត្តិការណ៍\n"
             "/addnote [ថ្ងៃ] &lt;អត្ថបទ&gt; — បន្ថែមកំណត់ចំណាំ\n"
-            "/login &lt;email&gt; &lt;password&gt; — ចូលគណនីប្រតិទិនរបស់អ្នក\n"
+            "/login — ចូលគណនីប្រតិទិនរបស់អ្នក (សួរអ៊ីមែល បន្ទាប់មកពាក្យសម្ងាត់)\n"
             "/register &lt;email&gt; &lt;password&gt; [ឈ្មោះ] — បង្កើតគណនីថ្មី\n"
             "/account — កំពុងប្រើគណនីណា · /logout — ចាកចេញ\n\n"
             "<b>ជជែកជាមួយ AI</b>\n"
@@ -161,6 +161,41 @@ STRINGS: dict[str, dict[str, str]] = {
     "working_shift_none": {
         "en": "👷 Working shift: none — no work scheduled",
         "km": "👷 វេនការងារ៖ គ្មាន — មិនមានការងារត្រូវធ្វើទេ",
+    },
+    "login_ask_email": {
+        "en": (
+            "📧 Please send your calendar account <b>email</b>.\n"
+            "(Your messages will be deleted right away so they never stay in "
+            "the chat. Type <b>cancel</b> to stop.)"
+        ),
+        "km": (
+            "📧 សូមផ្ញើ <b>អ៊ីមែល</b> នៃគណនីប្រតិទិនរបស់អ្នក។\n"
+            "(សាររបស់អ្នកនឹងត្រូវលុបភ្លាមៗ ដើម្បីកុំឱ្យនៅសល់ក្នុងការជជែក។ "
+            "វាយ <b>cancel</b> ដើម្បីបញ្ឈប់។)"
+        ),
+    },
+    "login_ask_password": {
+        "en": "🔑 Now send your <b>password</b>. It will be deleted immediately.",
+        "km": "🔑 ឥឡូវសូមផ្ញើ <b>ពាក្យសម្ងាត់</b> របស់អ្នក។ វានឹងត្រូវលុបភ្លាមៗ។",
+    },
+    "login_bad_email": {
+        "en": "⚠️ That doesn't look like an email address. Please try again (or type cancel).",
+        "km": "⚠️ វាហាក់ដូចជាមិនមែនអាសយដ្ឋានអ៊ីមែលទេ។ សូមព្យាយាមម្ដងទៀត (ឬវាយ cancel)។",
+    },
+    "login_cancelled": {
+        "en": "❌ Sign-in cancelled.",
+        "km": "❌ ការចូលគណនីត្រូវបានបោះបង់។",
+    },
+    "login_success": {
+        "en": (
+            "✅ Connected calendar account <b>{email}</b>.\n"
+            "This chat now sees only that account's events and notes. /logout to disconnect."
+        ),
+        "km": (
+            "✅ បានភ្ជាប់គណនីប្រតិទិន <b>{email}</b>។\n"
+            "ការជជែកនេះឃើញតែព្រឹត្តិការណ៍ និងកំណត់ចំណាំរបស់គណនីនោះប៉ុណ្ណោះ។ "
+            "/logout ដើម្បីផ្ដាច់។"
+        ),
     },
     "shifts_header": {
         "en": "👷 <b>Working schedule — {period}</b>\n",

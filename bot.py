@@ -385,14 +385,37 @@ def _parse_when(word: str) -> date:
     return date.fromisoformat(word)
 
 
+async def _complete_login(chat_id: int, email: str, password: str, bot) -> None:
+    cfg.clear_login_flow(chat_id)  # a one-line /login supersedes any pending flow
+    try:
+        await calendar.login(email, password)
+    except CalendarError as exc:
+        await bot.send_message(chat_id, f"⚠️ {exc}")
+        return
+    cfg.set_account(chat_id, email, password)
+    cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
+    calendar.drop_token(chat_id)
+    _drop_day_cache(chat_id)
+    _user_names.pop(chat_id, None)
+    await bot.send_message(
+        chat_id,
+        t(chat_id, "login_success", email=html.escape(email)),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    if not context.args:
+        # Interactive flow: ask email, then password; each message is deleted.
+        cfg.set_login_flow(chat_id, {"stage": "email"})
+        await _reply(update, t(chat_id, "login_ask_email"), ParseMode.HTML)
+        return
     if len(context.args) != 2:
         await _reply(
             update,
-            "Usage: /login <email> <password>\n"
-            "Connects YOUR calendar account to this chat — events, notes and the "
-            "daily digest become personal.\n⚠️ Use this in a private chat.",
+            "Usage: /login  (I will ask for email and password step by step)\n"
+            "or one line: /login <email> <password>\n⚠️ Use this in a private chat.",
         )
         return
     email, password = context.args[0], context.args[1]
@@ -400,22 +423,37 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.delete()  # hide the password ASAP
     except TelegramError:
         pass
+    await _complete_login(chat_id, email, password, context.bot)
+
+
+async def _handle_login_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One step of the interactive /login: the email or the password message."""
+    message = update.effective_message
+    chat_id = update.effective_chat.id
+    text = message.text.strip()
     try:
-        await calendar.login(email, password)
-    except CalendarError as exc:
-        await context.bot.send_message(chat_id, f"⚠️ {exc}")
+        await message.delete()  # credentials must never stay visible in the chat
+    except TelegramError:
+        pass
+    if text.lower() in ("cancel", "/cancel", "stop"):
+        cfg.clear_login_flow(chat_id)
+        await context.bot.send_message(chat_id, t(chat_id, "login_cancelled"))
         return
-    cfg.set_account(chat_id, email, password)
-    cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
-    calendar.drop_token(chat_id)
-    _drop_day_cache(chat_id)
-    _user_names.pop(chat_id, None)
-    await context.bot.send_message(
-        chat_id,
-        f"✅ Connected calendar account <b>{html.escape(email)}</b>.\n"
-        "This chat now sees only that account's events and notes. /logout to disconnect.",
-        parse_mode=ParseMode.HTML,
-    )
+    flow = cfg.get_login_flow(chat_id) or {"stage": "email"}
+    if flow["stage"] == "email":
+        if "@" not in text or " " in text:
+            await context.bot.send_message(
+                chat_id, t(chat_id, "login_bad_email"), parse_mode=ParseMode.HTML
+            )
+            return
+        cfg.set_login_flow(chat_id, {"stage": "password", "email": text})
+        await context.bot.send_message(
+            chat_id, t(chat_id, "login_ask_password"), parse_mode=ParseMode.HTML
+        )
+        return
+    email = flow["email"]
+    cfg.clear_login_flow(chat_id)
+    await _complete_login(chat_id, email, text, context.bot)
 
 
 async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -841,6 +879,9 @@ async def _chat_context_json(today: date, chat_id: int) -> str:
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text:
+        return
+    if cfg.get_login_flow(update.effective_chat.id):
+        await _handle_login_flow(update, context)
         return
     if not await _require_signin(update):
         return
