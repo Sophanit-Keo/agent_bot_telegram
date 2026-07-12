@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-CONFIG_FILE = BASE_DIR / "config.json"
+import storage  # after load_dotenv so UPSTASH_* from .env are visible
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CALENDAR_BASE_URL = os.getenv(
@@ -58,13 +58,7 @@ class Config:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._data = json.loads(json.dumps(_DEFAULTS))  # deep copy
-        if CONFIG_FILE.exists():
-            try:
-                stored = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    self._data.update(stored)
-            except (OSError, json.JSONDecodeError):
-                pass
+        self._data.update(storage.load("config"))
         # Seed API keys from the environment the first time they appear.
         for provider in PROVIDERS:
             env_key = os.getenv(f"{provider.upper()}_API_KEY", "").strip()
@@ -72,9 +66,7 @@ class Config:
                 self._data["api_keys"][provider] = env_key
 
     def _save(self) -> None:
-        CONFIG_FILE.write_text(
-            json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        storage.save("config", self._data)
 
     # -- LLM provider / keys ---------------------------------------------------
 

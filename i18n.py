@@ -66,6 +66,8 @@ STRINGS: dict[str, dict[str, str]] = {
             "/yesterday — summary + plan for yesterday\n"
             "/summary [YYYY-MM-DD] — schedule summary only\n"
             "/plan [YYYY-MM-DD] — daily plan only\n"
+            "/shifts [month|year|YYYY-MM|YYYY] — working-schedule list "
+            "(or just ask “check my schedule this month”)\n"
             "/settime HH:MM — time of the automatic daily digest\n"
             "/stop — unsubscribe this chat from the daily digest\n\n"
             "<b>Your calendar (dynamic input)</b>\n"
@@ -101,6 +103,8 @@ STRINGS: dict[str, dict[str, str]] = {
             "/yesterday — សម្រាប់ម្សិលមិញ\n"
             "/summary [YYYY-MM-DD] — សង្ខេបកាលវិភាគប៉ុណ្ណោះ\n"
             "/plan [YYYY-MM-DD] — ផែនការប្រចាំថ្ងៃប៉ុណ្ណោះ\n"
+            "/shifts [month|year|YYYY-MM|YYYY] — បញ្ជីវេនការងារ "
+            "(ឬសួរថា «កាលវិភាគការងារខែនេះ»)\n"
             "/settime HH:MM — ម៉ោងផ្ញើរបាយការណ៍ស្វ័យប្រវត្តិ\n"
             "/stop — បញ្ឈប់ការទទួលរបាយការណ៍ប្រចាំថ្ងៃ\n\n"
             "<b>ប្រតិទិនរបស់អ្នក (បញ្ចូលទិន្នន័យ)</b>\n"
@@ -157,6 +161,30 @@ STRINGS: dict[str, dict[str, str]] = {
     "working_shift_none": {
         "en": "👷 Working shift: none — no work scheduled",
         "km": "👷 វេនការងារ៖ គ្មាន — មិនមានការងារត្រូវធ្វើទេ",
+    },
+    "shifts_header": {
+        "en": "👷 <b>Working schedule — {period}</b>\n",
+        "km": "👷 <b>កាលវិភាគការងារ — {period}</b>\n",
+    },
+    "shifts_none": {
+        "en": "👷 No working shifts scheduled for {period}.",
+        "km": "👷 គ្មានវេនការងារសម្រាប់ {period} ទេ។",
+    },
+    "shifts_total": {
+        "en": "\nTotal: <b>{n}</b> working day(s), {off} day(s) off.",
+        "km": "\nសរុប៖ ថ្ងៃធ្វើការ <b>{n}</b> ថ្ងៃ, ថ្ងៃឈប់ {off} ថ្ងៃ។",
+    },
+    "shifts_usage": {
+        "en": (
+            "Usage: /shifts [month|year|YYYY-MM|YYYY]\n"
+            "Examples: /shifts · /shifts month · /shifts year · "
+            "/shifts 2026-08 · /shifts 2026"
+        ),
+        "km": (
+            "របៀបប្រើ៖ /shifts [month|year|YYYY-MM|YYYY]\n"
+            "ឧទាហរណ៍៖ /shifts · /shifts month · /shifts year · "
+            "/shifts 2026-08 · /shifts 2026"
+        ),
     },
     "sched_header": {
         "en": "🗓 <b>Schedule ({n} event(s))</b>",

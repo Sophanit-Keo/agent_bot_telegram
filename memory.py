@@ -8,32 +8,21 @@ keeping with a [REMEMBER: ...] tag in its reply.
 
 from __future__ import annotations
 
-import json
 import threading
 from datetime import datetime
-from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-MEMORY_FILE = BASE_DIR / "memory.json"
+import storage
+
 MAX_PER_CHAT = 50
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._data: dict[str, list[dict]] = {}
-        if MEMORY_FILE.exists():
-            try:
-                stored = json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    self._data = stored
-            except (OSError, json.JSONDecodeError):
-                pass
+        self._data: dict[str, list[dict]] = storage.load("memory")
 
     def _save(self) -> None:
-        MEMORY_FILE.write_text(
-            json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        storage.save("memory", self._data)
 
     def list(self, chat_id: int) -> list[str]:
         return [item["text"] for item in self._data.get(str(chat_id), [])]

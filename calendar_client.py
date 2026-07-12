@@ -178,6 +178,21 @@ class CalendarClient:
     async def me(self, chat_id: int | None = None) -> dict[str, Any]:
         return await self._request("GET", "/auth/me", chat_id=chat_id)
 
+    async def work_days(
+        self, date_from: str, date_to: str, chat_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Materialized work schedule for a date range: one entry per day with
+        shift_template (None = day off), starts_at/ends_at, blocked."""
+        return (
+            await self._request(
+                "GET",
+                "/work-schedule/days",
+                params={"from": date_from, "to": date_to},
+                chat_id=chat_id,
+            )
+            or []
+        )
+
     # -- Write endpoints (dynamic user input) ------------------------------------------------
 
     async def create_event(

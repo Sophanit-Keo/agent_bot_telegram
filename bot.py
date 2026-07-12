@@ -243,6 +243,92 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _send_calendar_view(update, context, "summary")
 
 
+def _shifts_period(arg: str) -> tuple[date, date, str] | None:
+    """Resolve 'month'/'year'/'YYYY-MM'/'YYYY'/'' to (start, end, label)."""
+    today = datetime.now(TZ).date()
+    arg = arg.strip().lower()
+    if arg in ("", "month", "this month"):
+        year, month = today.year, today.month
+    elif arg in ("year", "this year"):
+        start = date(today.year, 1, 1)
+        return start, date(today.year, 12, 31), str(today.year)
+    elif re.fullmatch(r"\d{4}", arg):
+        return date(int(arg), 1, 1), date(int(arg), 12, 31), arg
+    elif re.fullmatch(r"\d{4}-\d{2}", arg):
+        year, month = int(arg[:4]), int(arg[5:7])
+        if not 1 <= month <= 12:
+            return None
+    else:
+        return None
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) - timedelta(days=1) if month == 12 else date(
+        year, month + 1, 1
+    ) - timedelta(days=1)
+    return start, end, start.strftime("%B %Y")
+
+
+async def _send_shifts(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str) -> None:
+    """Working-schedule list for a month or year, from /work-schedule/days."""
+    if not await _require_signin(update):
+        return
+    chat_id = update.effective_chat.id
+    lang = cfg.get_language(chat_id)
+    period = _shifts_period(arg)
+    if period is None:
+        await _reply(update, t(chat_id, "shifts_usage"))
+        return
+    start, end, label = period
+    await _typing(update, context)
+    try:
+        days = await calendar.work_days(start.isoformat(), end.isoformat(), chat_id=chat_id)
+    except CalendarError as exc:
+        await _reply(update, f"⚠️ Calendar problem: {exc}")
+        return
+    working = [d for d in days if d.get("shift_template")]
+    if not working:
+        await _reply(update, tr(lang, "shifts_none", period=label), ParseMode.HTML)
+        return
+    lines = [tr(lang, "shifts_header", period=html.escape(label))]
+    by_year = start.year != end.year or start.month != end.month  # year view -> month groups
+    current_month = None
+    for entry in working:
+        day_date = date.fromisoformat(entry["date"])
+        if by_year and day_date.strftime("%B %Y") != current_month:
+            current_month = day_date.strftime("%B %Y")
+            lines.append(f"\n<b>{current_month}</b>")
+        shift = entry["shift_template"]
+        times = ""
+        if shift.get("start_time") and shift.get("end_time"):
+            times = f" ({shift['start_time']}–{shift['end_time']})"
+        lines.append(
+            f"• {day_date.strftime('%a %d %b')} — "
+            f"{html.escape(shift.get('name') or shift.get('code') or '?')}{times}"
+        )
+    lines.append(tr(lang, "shifts_total", n=len(working), off=len(days) - len(working)))
+    await _reply(update, "\n".join(lines), ParseMode.HTML)
+
+
+async def cmd_shifts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _send_shifts(update, context, " ".join(context.args or []))
+
+
+# "check my schedule this month/year" in plain chat -> answer with real data
+# instead of sending the huge range to the LLM.
+_SHIFTS_WORDS = re.compile(r"schedule|shifts?|work|កាលវិភាគ|វេន|ការងារ", re.IGNORECASE)
+_SHIFTS_MONTH = re.compile(r"\bthis month\b|\bmonth\b|ខែនេះ", re.IGNORECASE)
+_SHIFTS_YEAR = re.compile(r"\bthis year\b|\byear\b|ឆ្នាំនេះ", re.IGNORECASE)
+
+
+def _shifts_intent(text: str) -> str | None:
+    if len(text) > 80 or not _SHIFTS_WORDS.search(text):
+        return None
+    if _SHIFTS_YEAR.search(text):
+        return "year"
+    if _SHIFTS_MONTH.search(text):
+        return "month"
+    return None
+
+
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_calendar_view(update, context, "plan")
 
@@ -758,6 +844,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _require_signin(update):
         return
+    intent = _shifts_intent(message.text)
+    if intent:
+        await _send_shifts(update, context, intent)
+        return
     chat_id = update.effective_chat.id
     history = chat_histories[chat_id]
     history.append({"role": "user", "content": message.text})
@@ -887,21 +977,17 @@ async def post_shutdown(app: Application) -> None:
     await calendar.close()
 
 
-def main() -> None:
-    if not config.TELEGRAM_BOT_TOKEN:
-        raise SystemExit(
-            "TELEGRAM_BOT_TOKEN is missing.\n"
-            "1. Open Telegram, talk to @BotFather, send /newbot and follow the steps.\n"
-            "2. Paste the token into the .env file: TELEGRAM_BOT_TOKEN=123456:ABC...\n"
-            "3. Run this again."
-        )
-    app = (
-        ApplicationBuilder()
-        .token(config.TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
+def build_application(for_polling: bool = True) -> Application:
+    """Build the PTB application with every handler registered.
+
+    Used by main() for local long polling, and by api/webhook.py on Vercel
+    (webhook mode - no post_init/post_shutdown, no background daily loop:
+    the digest comes from Vercel Cron hitting api/cron.py instead).
+    """
+    builder = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN)
+    if for_polling:
+        builder = builder.post_init(post_init).post_shutdown(post_shutdown)
+    app = builder.build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -910,6 +996,7 @@ def main() -> None:
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("shifts", cmd_shifts))
     app.add_handler(CommandHandler("settime", cmd_settime))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("register", cmd_register))
@@ -930,7 +1017,18 @@ def main() -> None:
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+    return app
 
+
+def main() -> None:
+    if not config.TELEGRAM_BOT_TOKEN:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN is missing.\n"
+            "1. Open Telegram, talk to @BotFather, send /newbot and follow the steps.\n"
+            "2. Paste the token into the .env file: TELEGRAM_BOT_TOKEN=123456:ABC...\n"
+            "3. Run this again."
+        )
+    app = build_application(for_polling=True)
     logger.info("Starting polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

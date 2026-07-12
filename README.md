@@ -60,6 +60,7 @@ provides AI-powered conversations.
 | `/yesterday` | Summary + plan for yesterday |
 | `/summary [YYYY-MM-DD]` | Schedule summary only |
 | `/plan [YYYY-MM-DD]` | Daily plan only |
+| `/shifts [month\|year\|YYYY-MM\|YYYY]` | Working-schedule list for a month or year (also triggered by chatting "check my schedule this month/year") |
 | `/settime HH:MM` | Set the automatic digest time (24 h, Asia/Phnom_Penh) |
 | `/stop` | Unsubscribe from the daily digest |
 | `/addevent <date> <time> <title> [@ place]` | Add an event (`/addevent tomorrow 14:00-15:30 Meeting @ IT STEP`) |
@@ -95,6 +96,47 @@ requirements.txt    python-telegram-bot, anthropic, httpx, python-dotenv, tzdata
 .env                Secrets (bot token, calendar login) — never commit this
 config.json         Created at runtime: API keys, provider, chats, digest time
 ```
+
+## Deploy to Vercel (optional)
+
+Vercel is serverless, so the bot runs there in **webhook mode** instead of
+polling, the daily digest comes from **Vercel Cron**, and state is stored in
+**Upstash Redis** (Vercel's filesystem is wiped between requests).
+
+Files involved: `app.py` (ASGI entrypoint serving `/api/webhook` for Telegram
+updates and `/api/cron` for the daily digest), `vercel.json` (cron schedule,
+`30 23 * * *` UTC = 06:30 Phnom Penh), `storage.py` (Redis-or-file state).
+
+1. **Create a free Upstash Redis** database (https://upstash.com or the
+   Vercel Marketplace → Upstash) and copy `UPSTASH_REDIS_REST_URL` and
+   `UPSTASH_REDIS_REST_TOKEN`. Without them, logins/keys/memory reset
+   constantly on Vercel.
+2. **Import the project** into Vercel (push to GitHub → vercel.com → New
+   Project, or `npx vercel` in this folder).
+3. **Set environment variables** in the Vercel project settings.
+   Required: `TELEGRAM_BOT_TOKEN`, `UPSTASH_REDIS_REST_URL`,
+   `UPSTASH_REDIS_REST_TOKEN`. Optional: `GEMINI_API_KEY` etc. (or use
+   `/setkey` in the bot), `TIMEZONE`, `CALENDAR_BASE_URL` (defaults to the
+   right URL), and `CRON_SECRET` (protects `/api/cron`).
+   `CALENDAR_EMAIL`/`CALENDAR_PASSWORD` are **not needed** — every user signs
+   in with their own account via `/login`, stored per chat in Redis.
+4. **Deploy**, then point Telegram at the webhook (replace the token/URL):
+   ```
+   curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<your-app>.vercel.app/api/webhook"
+   ```
+5. Done — the bot answers via the webhook, and Vercel Cron sends the digest
+   daily at 06:30 Phnom Penh time.
+
+**Switching back to local:** Telegram allows only one delivery method, so
+before running `python bot.py` locally again, remove the webhook:
+```
+curl "https://api.telegram.org/bot<TOKEN>/deleteWebhook"
+```
+
+Limitations on Vercel: the digest time is fixed by `vercel.json` (the
+`/settime` command does not change Vercel's cron; on the free Hobby plan cron
+timing can drift within the hour), and short-term chat history may reset
+between messages (long-term `/memory` persists in Redis).
 
 ## Notes
 

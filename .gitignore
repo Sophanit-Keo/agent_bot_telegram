@@ -4,3 +4,7 @@ __pycache__/
 .env
 config.json
 memory.json
+
+.vercel
+.env*
+!.env.example
