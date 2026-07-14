@@ -38,7 +38,7 @@ PROVIDER_LABELS = {
 }
 
 DEFAULT_MODELS = {
-    "gemini": "gemini-3.5-flash",
+    "gemini": "gemini-3.1-flash-live",
     "claude": "claude-opus-4-8",
     "openai": "gpt-4o-mini",
 }
