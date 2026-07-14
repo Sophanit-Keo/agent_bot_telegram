@@ -36,7 +36,8 @@ def load(name: str) -> dict:
     if USE_REDIS:
         try:
             response = httpx.get(f"{REDIS_URL}/get/bot:{name}", headers=_HEADERS, timeout=10)
-            result = response.json().get("result") if response.status_code == 200 else None
+            response.raise_for_status()
+            result = response.json().get("result")
             return json.loads(result) if result else {}
         except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("Redis load of %s failed: %s", name, exc)
@@ -46,23 +47,37 @@ def load(name: str) -> dict:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Local load of %s failed: %s", name, exc)
     return {}
 
 
 def save(name: str, data: dict) -> None:
     if USE_REDIS:
         try:
-            httpx.post(
+            response = httpx.post(
                 f"{REDIS_URL}/set/bot:{name}",
                 headers=_HEADERS,
                 content=json.dumps(data, ensure_ascii=False),
                 timeout=10,
             )
+            response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.warning("Redis save of %s failed: %s", name, exc)
         return
-    (BASE_DIR / f"{name}.json").write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    path = BASE_DIR / f"{name}.json"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, path)  # atomic on the same filesystem
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # Some Windows filesystems do not implement POSIX permissions.
+    except OSError as exc:
+        logger.error("Local save of %s failed: %s", name, exc)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -136,7 +136,8 @@ def build_summary(
         lines.append(tr(lang, "no_events"))
     else:
         lines.append(tr(lang, "sched_header", n=len(events)))
-        first_start, last_end, busy_minutes = None, None, 0
+        first_start, last_end = None, None
+        busy_ranges: list[tuple[datetime, datetime]] = []
         for event in events:
             title = html.escape(str(event.get("title") or "Untitled event"))
             location = event.get("location")
@@ -156,9 +157,20 @@ def build_summary(
                 first_start = min(first_start or start, start)
             if end:
                 last_end = max(last_end or end, end)
-                if start:
-                    busy_minutes += int((end - start).total_seconds() // 60)
+                if start and end > start:
+                    busy_ranges.append((start, end))
         if first_start and last_end:
+            # Merge overlaps so simultaneous events are not counted twice.
+            busy_minutes = 0
+            if busy_ranges:
+                range_start, range_end = sorted(busy_ranges, key=lambda item: item[0])[0]
+                for start, end in sorted(busy_ranges, key=lambda item: item[0])[1:]:
+                    if start <= range_end:
+                        range_end = max(range_end, end)
+                    else:
+                        busy_minutes += int((range_end - range_start).total_seconds() // 60)
+                        range_start, range_end = start, end
+                busy_minutes += int((range_end - range_start).total_seconds() // 60)
             lines.append(
                 tr(
                     lang,

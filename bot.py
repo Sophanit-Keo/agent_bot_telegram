@@ -18,15 +18,17 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, Update
-from telegram.constants import ChatAction, ParseMode
+from telegram import BotCommand, BotCommandScopeChat, Update
+from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -65,6 +67,41 @@ chat_histories: dict[int, deque] = defaultdict(lambda: deque(maxlen=30))
 # Short-lived cache of calendar day payloads used to ground the AI chat.
 _day_cache: dict[str, tuple[float, dict]] = {}
 DAY_CACHE_TTL = 300  # seconds
+
+AUTH_COMMANDS = [
+    BotCommand("login", "Sign in to your calendar account"),
+    BotCommand("register", "Create a calendar account"),
+]
+
+FULL_COMMANDS = [
+    BotCommand("start", "Show the main menu and subscribe to digests"),
+    BotCommand("today", "Schedule summary + AI daily plan"),
+    BotCommand("tomorrow", "Summary + plan for tomorrow"),
+    BotCommand("yesterday", "Summary + plan for yesterday"),
+    BotCommand("addevent", "Add an event: /addevent tomorrow 14:00 Title"),
+    BotCommand("addnote", "Add a note: /addnote [date] text"),
+    BotCommand("summary", "Schedule summary"),
+    BotCommand("plan", "AI daily plan"),
+    BotCommand("shifts", "Show work shifts for a month or year"),
+    BotCommand("account", "Show the connected calendar account"),
+    BotCommand("login", "Reconnect a calendar account"),
+    BotCommand("register", "Create a new calendar account"),
+    BotCommand("cancel", "Cancel an interactive sign-in"),
+    BotCommand("logout", "Sign out of the calendar account"),
+    BotCommand("model", "Show or switch AI provider"),
+    BotCommand("language", "Language / ភាសា: en or km"),
+    BotCommand("memory", "What the bot remembers"),
+    BotCommand("remember", "Save a fact: /remember <fact>"),
+    BotCommand("forget", "Forget a fact: /forget <n|all>"),
+    BotCommand("keys", "List configured API-key pools"),
+    BotCommand("setkey", "Add API key(s): /setkey gemini <key>"),
+    BotCommand("delkey", "Remove one or all saved API keys"),
+    BotCommand("setmodel", "Override a provider model ID"),
+    BotCommand("settime", "Set daily digest time (HH:MM)"),
+    BotCommand("reset", "Clear AI chat history"),
+    BotCommand("stop", "Unsubscribe from daily digest"),
+    BotCommand("help", "Show help"),
+]
 
 
 async def _cached_day(date_str: str, chat_id: int | None = None) -> dict:
@@ -158,15 +195,77 @@ async def _typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 
+async def _require_private_chat(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, contains_secret: bool = False
+) -> bool:
+    """Block credential commands in groups where deletion is not guaranteed."""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        return True
+    if contains_secret:
+        try:
+            await update.effective_message.delete()
+        except TelegramError:
+            pass
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "🔒 For your security, login, registration, and API-key commands only work "
+        "in a private chat with this bot. Delete the command if it contained a secret.",
+    )
+    return False
+
+
+async def _set_command_menu(bot, chat_id: int, signed_in: bool) -> None:
+    """Show only authentication commands until this chat is signed in."""
+    try:
+        await bot.set_my_commands(
+            FULL_COMMANDS if signed_in else AUTH_COMMANDS,
+            scope=BotCommandScopeChat(chat_id=chat_id),
+        )
+    except TelegramError as exc:
+        # Menu setup is cosmetic; authorization is still enforced by auth_gate.
+        logger.warning("Could not update command menu for chat %s: %s", chat_id, exc)
+
+
+async def auth_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Block every feature except sign-in/registration for unsigned chats.
+
+    /start remains reachable so Telegram's Start button can display the sign-in
+    prompt. Plain text is allowed only while the guided /login flow is waiting
+    for the email or password.
+    """
+    chat = update.effective_chat
+    message = update.effective_message
+    if chat is None or message is None or not message.text:
+        return
+    chat_id = chat.id
+    if cfg.get_account(chat_id):
+        return
+
+    text = message.text.strip()
+    command = ""
+    if text.startswith("/"):
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    if command in {"/start", "/login", "/register"}:
+        return
+    if not command and cfg.get_login_flow(chat_id):
+        return
+
+    await _set_command_menu(context.bot, chat_id, signed_in=False)
+    await _reply(update, t(chat_id, "signin"), ParseMode.HTML)
+    raise ApplicationHandlerStop
+
+
 # -- calendar / planning commands --------------------------------------------------
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not cfg.get_account(chat_id):
-        # Not signed in yet: only show how to sign in (and /language).
+        # Not signed in yet: only show how to sign in or register.
+        await _set_command_menu(context.bot, chat_id, signed_in=False)
         await _reply(update, t(chat_id, "signin"), ParseMode.HTML)
         return
+    await _set_command_menu(context.bot, chat_id, signed_in=True)
     cfg.add_chat(chat_id)
     greeting = t(chat_id, "start_greeting", time=cfg.daily_time)
     await _reply(update, greeting + t(chat_id, "help"), ParseMode.HTML)
@@ -388,15 +487,16 @@ def _parse_when(word: str) -> date:
 async def _complete_login(chat_id: int, email: str, password: str, bot) -> None:
     cfg.clear_login_flow(chat_id)  # a one-line /login supersedes any pending flow
     try:
-        await calendar.login(email, password)
+        token = await calendar.login(email, password)
     except CalendarError as exc:
         await bot.send_message(chat_id, f"⚠️ {exc}")
         return
-    cfg.set_account(chat_id, email, password)
+    cfg.set_account(chat_id, email, token)
     cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
-    calendar.drop_token(chat_id)
+    calendar.set_token(chat_id, token)
     _drop_day_cache(chat_id)
     _user_names.pop(chat_id, None)
+    await _set_command_menu(bot, chat_id, signed_in=True)
     await bot.send_message(
         chat_id,
         t(chat_id, "login_success", email=html.escape(email)),
@@ -406,6 +506,8 @@ async def _complete_login(chat_id: int, email: str, password: str, bot) -> None:
 
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    if not await _require_private_chat(update, context, contains_secret=bool(context.args)):
+        return
     if not context.args:
         # Interactive flow: ask email, then password; each message is deleted.
         cfg.set_login_flow(chat_id, {"stage": "email"})
@@ -458,6 +560,9 @@ async def _handle_login_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    if not await _require_private_chat(update, context, contains_secret=bool(context.args)):
+        return
+    cfg.clear_login_flow(chat_id)  # /register supersedes an unfinished /login
     if len(context.args) < 2:
         await _reply(
             update,
@@ -473,15 +578,16 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except TelegramError:
         pass
     try:
-        await calendar.register(name, email, password)
+        token = await calendar.register(name, email, password)
     except CalendarError as exc:
         await context.bot.send_message(chat_id, f"⚠️ {exc}")
         return
-    cfg.set_account(chat_id, email, password)
+    cfg.set_account(chat_id, email, token)
     cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
-    calendar.drop_token(chat_id)
+    calendar.set_token(chat_id, token)
     _drop_day_cache(chat_id)
     _user_names[chat_id] = name
+    await _set_command_menu(context.bot, chat_id, signed_in=True)
     await context.bot.send_message(
         chat_id,
         f"🎉 Calendar account created for <b>{html.escape(name)}</b> "
@@ -497,6 +603,8 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     calendar.drop_token(chat_id)
     _drop_day_cache(chat_id)
     _user_names.pop(chat_id, None)
+    cfg.clear_login_flow(chat_id)
+    await _set_command_menu(context.bot, chat_id, signed_in=False)
     await _reply(
         update,
         "👋 Signed out. You need to /login (or /register) again before using the bot."
@@ -545,18 +653,22 @@ async def cmd_addevent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not match:
         await _reply(update, ADDEVENT_USAGE)
         return
-    start_dt = datetime.combine(
-        event_date, datetime.strptime(match.group(1), "%H:%M").time()
-    )
-    if match.group(2):
-        end_dt = datetime.combine(
-            event_date, datetime.strptime(match.group(2), "%H:%M").time()
+    try:
+        start_dt = datetime.combine(
+            event_date, datetime.strptime(match.group(1), "%H:%M").time()
         )
+        end_dt = (
+            datetime.combine(event_date, datetime.strptime(match.group(2), "%H:%M").time())
+            if match.group(2)
+            else start_dt + timedelta(hours=1)
+        )
+    except ValueError:
+        await _reply(update, ADDEVENT_USAGE)
+        return
+    if match.group(2):
         if end_dt <= start_dt:
             await _reply(update, "End time must be after the start time.")
             return
-    else:
-        end_dt = start_dt + timedelta(hours=1)  # default duration: 1 hour
 
     title, _, location = " ".join(args[2:]).partition("@")
     title, location = title.strip(), location.strip()
@@ -653,10 +765,14 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_signin(update):
         return
+    if not await _require_private_chat(update, context, contains_secret=len(context.args) >= 2):
+        return
     if len(context.args) < 2:
         await _reply(
             update,
-            "Usage: /setkey <provider> <api-key>\nProviders: gemini, claude, openai\n"
+            "Usage: /setkey <provider> <api-key> [more-keys...]\n"
+            "Keys are added to that provider's automatic failover pool.\n"
+            "Providers: gemini, claude, openai\n"
             "⚠️ Send this in a private chat with the bot.",
         )
         return
@@ -664,18 +780,34 @@ async def cmd_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not provider:
         await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
         return
-    key = context.args[1].strip()
-    cfg.set_key(provider, key)
+    keys = [key.strip() for key in context.args[1:]]
+    if any(not key or len(key) > 500 for key in keys):
+        await _reply(update, "Every API key must be non-empty and at most 500 characters.")
+        return
+    current_count = len(cfg.get_keys(provider))
+    unique_new = list(dict.fromkeys(key for key in keys if key not in cfg.get_keys(provider)))
+    if current_count + len(unique_new) > 20:
+        await _reply(update, "A provider can store at most 20 API keys.")
+        return
+    added = [key for key in unique_new if cfg.set_key(provider, key)]
     # Remove the message containing the raw key from the chat, when possible.
     deleted = True
     try:
         await update.effective_message.delete()
     except TelegramError:
         deleted = False
-    text = (
-        f"🔑 API key for <b>{PROVIDER_LABELS[provider]}</b> saved ({_mask(key)}).\n"
-        f"Model: <code>{html.escape(cfg.model_for(provider))}</code>"
-    )
+    total = len(cfg.get_keys(provider))
+    if added:
+        masked = ", ".join(_mask(key) for key in added)
+        text = (
+            f"🔑 Added <b>{len(added)}</b> key(s) for "
+            f"<b>{PROVIDER_LABELS[provider]}</b>: {masked}\n"
+            f"Pool size: <b>{total}</b>. The next key is tried automatically on "
+            "key, quota, rate-limit, network, or temporary API errors.\n"
+            f"Model: <code>{html.escape(cfg.model_for(provider))}</code>"
+        )
+    else:
+        text = f"Those keys are already in the {PROVIDER_LABELS[provider]} pool ({total} total)."
     if not deleted:
         text += "\n⚠️ I could not delete your message — remove it manually to protect the key."
     await context.bot.send_message(update.effective_chat.id, text, parse_mode=ParseMode.HTML)
@@ -685,18 +817,36 @@ async def cmd_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await _require_signin(update):
         return
     if not context.args:
-        await _reply(update, "Usage: /delkey <provider>")
+        await _reply(update, "Usage: /delkey <provider> <number|all>\nSee key numbers with /keys.")
         return
     provider = _resolve_provider(context.args[0])
     if not provider:
         await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
         return
-    removed = cfg.delete_key(provider)
+    if len(context.args) < 2:
+        await _reply(update, f"Choose a key number from /keys, or use /delkey {provider} all")
+        return
+    selector = context.args[1].lower()
+    if selector == "all":
+        removed = cfg.delete_key(provider)
+        await _reply(
+            update,
+            f"🗑 All keys for {PROVIDER_LABELS[provider]} removed."
+            if removed
+            else f"No keys were stored for {PROVIDER_LABELS[provider]}.",
+        )
+        return
+    try:
+        index = int(selector)
+    except ValueError:
+        await _reply(update, "Use a key number from /keys, or 'all'.")
+        return
+    removed_key = cfg.delete_key_at(provider, index)
     await _reply(
         update,
-        f"🗑 Key for {PROVIDER_LABELS[provider]} removed."
-        if removed
-        else f"No key was stored for {PROVIDER_LABELS[provider]}.",
+        f"🗑 Removed {PROVIDER_LABELS[provider]} key #{index} ({_mask(removed_key)})."
+        if removed_key
+        else f"There is no {PROVIDER_LABELS[provider]} key #{index}.",
     )
 
 
@@ -705,13 +855,18 @@ async def cmd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = ["🔐 <b>Configured providers</b>"]
     for provider in PROVIDERS:
-        key = cfg.get_key(provider)
+        keys = cfg.get_keys(provider)
         active = " ✅ active" if provider == cfg.provider else ""
-        status = _mask(key) if key else "— no key (/setkey)"
-        lines.append(
-            f"• <b>{PROVIDER_LABELS[provider]}</b>: {status} · "
-            f"<code>{html.escape(cfg.model_for(provider))}</code>{active}"
+        status = (
+            ", ".join(f"#{i} {_mask(key)}" for i, key in enumerate(keys, start=1))
+            if keys
+            else "— no keys (/setkey)"
         )
+        lines.append(
+            f"• <b>{PROVIDER_LABELS[provider]}</b> ({len(keys)}): {status}\n"
+            f"  <code>{html.escape(cfg.model_for(provider))}</code>{active}"
+        )
+    lines.append("\nThe bot automatically tries the next key after a retryable failure.")
     await _reply(update, "\n".join(lines), ParseMode.HTML)
 
 
@@ -736,8 +891,8 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"✅ Chat and planning now use <b>{PROVIDER_LABELS[provider]}</b> "
         f"(<code>{html.escape(cfg.model_for(provider))}</code>)."
     )
-    if not cfg.get_key(provider):
-        text += f"\n⚠️ No API key stored yet — add one with /setkey {provider} <key>"
+    if not cfg.get_keys(provider):
+        text += f"\n⚠️ No API keys stored yet — add one with /setkey {provider} <key>"
     await _reply(update, text, ParseMode.HTML)
 
 
@@ -965,14 +1120,16 @@ async def _broadcast_digest(app: Application) -> None:
 async def _daily_loop(app: Application) -> None:
     """Fire the digest once per day at cfg.daily_time (checked every 20 s, so
     /settime changes take effect immediately without rescheduling anything)."""
-    sent_on: date | None = None
     logger.info("Daily digest scheduler running (time=%s %s)", cfg.daily_time, config.TIMEZONE)
     while True:
         now = datetime.now(TZ)
-        if sent_on != now.date() and now.strftime("%H:%M") == cfg.daily_time:
-            sent_on = now.date()
+        today = now.date().isoformat()
+        # Use >= so a short outage or event-loop stall does not lose the digest.
+        # The persisted date prevents a process restart from sending it twice.
+        if cfg.last_digest_date != today and now.strftime("%H:%M") >= cfg.daily_time:
             try:
                 await _broadcast_digest(app)
+                cfg.mark_digest_sent(today)
             except Exception:
                 logger.exception("Daily digest broadcast failed")
         await asyncio.sleep(20)
@@ -985,36 +1142,40 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled error while processing update", exc_info=context.error)
 
 
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if cfg.get_login_flow(chat_id):
+        cfg.clear_login_flow(chat_id)
+        await _reply(update, t(chat_id, "login_cancelled"))
+    else:
+        await _reply(update, "Nothing is waiting to be cancelled.")
+
+
+async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, "I don't know that command. Use /help to see available commands.")
+
+
 async def post_init(app: Application) -> None:
-    await app.bot.set_my_commands(
-        [
-            BotCommand("today", "Schedule summary + AI daily plan"),
-            BotCommand("tomorrow", "Summary + plan for tomorrow"),
-            BotCommand("yesterday", "Summary + plan for yesterday"),
-            BotCommand("addevent", "Add an event: /addevent tomorrow 14:00 Title"),
-            BotCommand("addnote", "Add a note: /addnote [date] text"),
-            BotCommand("login", "Connect your calendar account"),
-            BotCommand("account", "Which calendar account this chat uses"),
-            BotCommand("summary", "Schedule summary"),
-            BotCommand("plan", "AI daily plan"),
-            BotCommand("model", "Show / switch AI provider"),
-            BotCommand("language", "Language / ភាសា: en or km"),
-            BotCommand("memory", "What the bot remembers"),
-            BotCommand("remember", "Save a fact: /remember <fact>"),
-            BotCommand("forget", "Forget a fact: /forget <n|all>"),
-            BotCommand("keys", "List configured API keys"),
-            BotCommand("setkey", "Save an API key: /setkey claude <key>"),
-            BotCommand("settime", "Set daily digest time (HH:MM)"),
-            BotCommand("reset", "Clear AI chat history"),
-            BotCommand("stop", "Unsubscribe from daily digest"),
-            BotCommand("help", "Show help"),
-        ]
+    # Unknown/new chats inherit the authentication-only menu. Persisted signed
+    # in chats receive a full per-chat menu again after every bot restart.
+    await app.bot.set_my_commands(AUTH_COMMANDS)
+    for chat_id in cfg.account_chat_ids:
+        await _set_command_menu(app.bot, chat_id, signed_in=True)
+    # post_init runs just before PTB marks the application as running, so using
+    # Application.create_task here emits a warning. Track a native task and
+    # cancel/await it explicitly during shutdown instead.
+    app.bot_data["daily_loop_task"] = asyncio.create_task(
+        _daily_loop(app), name="daily-digest-loop"
     )
-    app.create_task(_daily_loop(app))
     logger.info("Bot is up. Active AI provider: %s", cfg.provider)
 
 
 async def post_shutdown(app: Application) -> None:
+    task = app.bot_data.pop("daily_loop_task", None)
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     await calendar.close()
 
 
@@ -1030,6 +1191,8 @@ def build_application(for_polling: bool = True) -> Application:
         builder = builder.post_init(post_init).post_shutdown(post_shutdown)
     app = builder.build()
 
+    # Run authorization before every command/text handler in the normal group.
+    app.add_handler(MessageHandler(filters.ALL, auth_gate), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("today", cmd_today))
@@ -1040,6 +1203,7 @@ def build_application(for_polling: bool = True) -> Application:
     app.add_handler(CommandHandler("shifts", cmd_shifts))
     app.add_handler(CommandHandler("settime", cmd_settime))
     app.add_handler(CommandHandler("login", cmd_login))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("register", cmd_register))
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("account", cmd_account))
@@ -1056,6 +1220,7 @@ def build_application(for_polling: bool = True) -> Application:
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     return app

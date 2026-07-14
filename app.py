@@ -12,6 +12,8 @@ Local polling mode (`python bot.py`) is unaffected.
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import json
 import logging
 import os
@@ -24,13 +26,17 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("vercel")
 
 _app = None
+_app_lock = asyncio.Lock()
 
 
 async def _get_app():
     global _app
     if _app is None:
-        _app = bot.build_application(for_polling=False)
-        await _app.initialize()
+        async with _app_lock:
+            if _app is None:
+                application = bot.build_application(for_polling=False)
+                await application.initialize()
+                _app = application
     return _app
 
 
@@ -39,6 +45,8 @@ async def _read_body(receive) -> bytes:
     while True:
         message = await receive()
         body += message.get("body", b"")
+        if len(body) > 1_000_000:
+            raise ValueError("request body is too large")
         if not message.get("more_body"):
             return body
 
@@ -78,6 +86,15 @@ async def app(scope, receive, send):
     method = scope.get("method", "GET").upper()
 
     if path == "/api/webhook" and method == "POST":
+        webhook_secret = bot.config.TELEGRAM_WEBHOOK_SECRET
+        if not webhook_secret:
+            log.error("TELEGRAM_WEBHOOK_SECRET is not configured; refusing webhook updates")
+            await _respond(send, 503, "webhook secret is not configured")
+            return
+        supplied_secret = _header(scope, "x-telegram-bot-api-secret-token")
+        if not hmac.compare_digest(supplied_secret, webhook_secret):
+            await _respond(send, 401, "unauthorized")
+            return
         # Always answer 200 so Telegram won't retry-storm on our errors.
         try:
             data = json.loads(await _read_body(receive) or b"{}")
@@ -90,7 +107,12 @@ async def app(scope, receive, send):
 
     if path == "/api/cron" and method == "GET":
         secret = os.getenv("CRON_SECRET", "")
-        if secret and _header(scope, "authorization") != f"Bearer {secret}":
+        if not secret:
+            log.error("CRON_SECRET is not configured; refusing public digest trigger")
+            await _respond(send, 503, "cron secret is not configured")
+            return
+        supplied = _header(scope, "authorization")
+        if not hmac.compare_digest(supplied, f"Bearer {secret}"):
             await _respond(send, 401, "unauthorized")
             return
         try:
@@ -99,7 +121,10 @@ async def app(scope, receive, send):
             await _respond(send, 200, "digest sent")
         except Exception:
             log.exception("cron error")
-            await _respond(send, 200, "digest failed - see logs")
+            await _respond(send, 500, "digest failed - see logs")
         return
 
-    await _respond(send, 200, "AI Telegram Agent is alive")
+    if path in ("", "/") and method == "GET":
+        await _respond(send, 200, "AI Telegram Agent is alive")
+    else:
+        await _respond(send, 404, "not found")

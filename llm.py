@@ -11,6 +11,8 @@ chronological order, ending with the latest user message.
 
 from __future__ import annotations
 
+import logging
+
 import anthropic
 import httpx
 
@@ -18,6 +20,11 @@ from config import PROVIDER_LABELS, PROVIDERS, cfg
 
 REQUEST_TIMEOUT = 120.0
 MAX_TOKENS = 3000
+logger = logging.getLogger(__name__)
+
+# Last successful key per provider. A failed preferred key is moved behind the
+# next key for future requests. Values never leave this process or appear in logs.
+_preferred_keys: dict[str, str] = {}
 
 
 class LLMError(Exception):
@@ -28,6 +35,10 @@ class LLMNotConfigured(LLMError):
     """No API key stored for the requested provider."""
 
 
+class LLMKeyUnavailable(LLMError):
+    """This key cannot serve the request; another key may succeed."""
+
+
 async def chat(
     provider: str,
     messages: list[dict[str, str]],
@@ -36,18 +47,47 @@ async def chat(
 ) -> str:
     if provider not in PROVIDERS:
         raise LLMError(f"Unknown provider '{provider}'. Choose one of: {', '.join(PROVIDERS)}")
-    api_key = cfg.get_key(provider)
-    if not api_key:
+    api_keys = cfg.get_keys(provider)
+    if not api_keys:
         raise LLMNotConfigured(
-            f"No API key configured for {PROVIDER_LABELS[provider]}.\n"
-            f"Set one with:  /setkey {provider} <YOUR_API_KEY>"
+            f"No API keys configured for {PROVIDER_LABELS[provider]}.\n"
+            f"Add one with:  /setkey {provider} <YOUR_API_KEY>"
         )
     model = cfg.model_for(provider)
-    if provider == "claude":
-        return await _claude(api_key, model, system, messages, max_tokens)
-    if provider == "gemini":
-        return await _gemini(api_key, model, system, messages, max_tokens)
-    return await _openai(api_key, model, system, messages, max_tokens)
+    preferred = _preferred_keys.get(provider)
+    if preferred in api_keys:
+        start = api_keys.index(preferred)
+        api_keys = api_keys[start:] + api_keys[:start]
+
+    last_error: LLMKeyUnavailable | None = None
+    for position, api_key in enumerate(api_keys, start=1):
+        try:
+            if provider == "claude":
+                answer = await _claude(api_key, model, system, messages, max_tokens)
+            elif provider == "gemini":
+                answer = await _gemini(api_key, model, system, messages, max_tokens)
+            else:
+                answer = await _openai(api_key, model, system, messages, max_tokens)
+        except LLMKeyUnavailable as exc:
+            last_error = exc
+            if position < len(api_keys):
+                logger.warning(
+                    "%s key %d/%d failed (%s); trying the next key",
+                    PROVIDER_LABELS[provider],
+                    position,
+                    len(api_keys),
+                    exc,
+                )
+            continue
+        _preferred_keys[provider] = api_key
+        return answer
+
+    _preferred_keys.pop(provider, None)
+    detail = str(last_error) if last_error else "unknown provider error"
+    raise LLMError(
+        f"All {len(api_keys)} configured {PROVIDER_LABELS[provider]} API key(s) "
+        f"failed. Last error: {detail}"
+    )
 
 
 # -- Anthropic Claude (official SDK) --------------------------------------------
@@ -67,15 +107,19 @@ async def _claude(
             kwargs["system"] = system
         response = await client.messages.create(**kwargs)
     except anthropic.AuthenticationError as exc:
-        raise LLMError("Claude rejected the API key. Update it with /setkey claude <key>") from exc
+        raise LLMKeyUnavailable("Claude rejected an API key.") from exc
     except anthropic.NotFoundError as exc:
         raise LLMError(f"Claude model '{model}' not found. Fix it with /setmodel claude <model>") from exc
     except anthropic.RateLimitError as exc:
-        raise LLMError("Claude is rate-limited right now - try again in a moment.") from exc
+        raise LLMKeyUnavailable("Claude rate limit or quota reached.") from exc
     except anthropic.APIStatusError as exc:
+        if exc.status_code in (401, 403, 408, 409, 429) or exc.status_code >= 500:
+            raise LLMKeyUnavailable(
+                f"Claude API temporary/key error {exc.status_code}: {exc.message}"
+            ) from exc
         raise LLMError(f"Claude API error {exc.status_code}: {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise LLMError("Could not reach the Claude API (network error).") from exc
+        raise LLMKeyUnavailable("Could not reach the Claude API (network error).") from exc
     finally:
         await client.close()
 
@@ -120,14 +164,23 @@ async def _gemini(
                 json=body,
             )
     except httpx.HTTPError as exc:
-        raise LLMError("Could not reach the Gemini API (network error).") from exc
+        raise LLMKeyUnavailable("Could not reach the Gemini API (network error).") from exc
 
     if response.status_code in (401, 403):
-        raise LLMError("Gemini rejected the API key. Update it with /setkey gemini <key>")
+        raise LLMKeyUnavailable("Gemini rejected an API key.")
     if response.status_code == 404:
         raise LLMError(f"Gemini model '{model}' not found. Fix it with /setmodel gemini <model>")
     if response.status_code == 429:
-        raise LLMError("Gemini is rate-limited right now - try again in a moment.")
+        raise LLMKeyUnavailable("Gemini rate limit or quota reached.")
+    if response.status_code in (408, 409) or response.status_code >= 500:
+        raise LLMKeyUnavailable(
+            f"Gemini API temporary error {response.status_code}: {response.text[:300]}"
+        )
+    if response.status_code == 400 and any(
+        marker in response.text.lower()
+        for marker in ("api_key_invalid", "api key not valid", "invalid api key")
+    ):
+        raise LLMKeyUnavailable("Gemini rejected an API key.")
     if response.status_code != 200:
         raise LLMError(f"Gemini API error {response.status_code}: {response.text[:300]}")
 
@@ -166,14 +219,18 @@ async def _openai(
                 },
             )
     except httpx.HTTPError as exc:
-        raise LLMError("Could not reach the OpenAI API (network error).") from exc
+        raise LLMKeyUnavailable("Could not reach the OpenAI API (network error).") from exc
 
-    if response.status_code == 401:
-        raise LLMError("OpenAI rejected the API key. Update it with /setkey openai <key>")
+    if response.status_code in (401, 403):
+        raise LLMKeyUnavailable("OpenAI rejected an API key.")
     if response.status_code == 404:
         raise LLMError(f"OpenAI model '{model}' not found. Fix it with /setmodel openai <model>")
     if response.status_code == 429:
-        raise LLMError("OpenAI is rate-limited (or out of quota) - try again later.")
+        raise LLMKeyUnavailable("OpenAI rate limit or quota reached.")
+    if response.status_code in (408, 409) or response.status_code >= 500:
+        raise LLMKeyUnavailable(
+            f"OpenAI API temporary error {response.status_code}: {response.text[:300]}"
+        )
     if response.status_code != 200:
         raise LLMError(f"OpenAI API error {response.status_code}: {response.text[:300]}")
 
