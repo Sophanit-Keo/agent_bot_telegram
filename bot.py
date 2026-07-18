@@ -772,13 +772,13 @@ async def cmd_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             update,
             "Usage: /setkey <provider> <api-key> [more-keys...]\n"
             "Keys are added to that provider's automatic failover pool.\n"
-            "Providers: gemini, claude, openai\n"
+            f"Providers: {', '.join(PROVIDERS)}\n"
             "⚠️ Send this in a private chat with the bot.",
         )
         return
     provider = _resolve_provider(context.args[0])
     if not provider:
-        await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
+        await _reply(update, f"Unknown provider. Use one of: {', '.join(PROVIDERS)}")
         return
     keys = [key.strip() for key in context.args[1:]]
     if any(not key or len(key) > 500 for key in keys):
@@ -821,7 +821,7 @@ async def cmd_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     provider = _resolve_provider(context.args[0])
     if not provider:
-        await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
+        await _reply(update, f"Unknown provider. Use one of: {', '.join(PROVIDERS)}")
         return
     if len(context.args) < 2:
         await _reply(update, f"Choose a key number from /keys, or use /delkey {provider} all")
@@ -878,13 +878,13 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🧠 Active AI: <b>{PROVIDER_LABELS[cfg.provider]}</b> "
             f"(<code>{html.escape(cfg.model_for(cfg.provider))}</code>)",
             "",
-            "Switch with /model gemini · /model claude · /model openai",
+            "Switch with " + " · ".join(f"/model {p}" for p in PROVIDERS),
         ]
         await _reply(update, "\n".join(lines), ParseMode.HTML)
         return
     provider = _resolve_provider(context.args[0])
     if not provider:
-        await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
+        await _reply(update, f"Unknown provider. Use one of: {', '.join(PROVIDERS)}")
         return
     cfg.set_provider(provider)
     text = (
@@ -905,7 +905,7 @@ async def cmd_setmodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     provider = _resolve_provider(context.args[0])
     if not provider:
-        await _reply(update, "Unknown provider. Use one of: gemini, claude, openai")
+        await _reply(update, f"Unknown provider. Use one of: {', '.join(PROVIDERS)}")
         return
     model = context.args[1].strip()
     cfg.set_model(provider, model)

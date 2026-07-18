@@ -28,19 +28,22 @@ CALENDAR_EMAIL = os.getenv("CALENDAR_EMAIL", "").strip()
 CALENDAR_PASSWORD = os.getenv("CALENDAR_PASSWORD", "")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Phnom_Penh").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+ANAJAK_BASE_URL = os.getenv("ANAJAK_BASE_URL", "https://api.anajaklabs.dev").rstrip("/")
 
-PROVIDERS = ("gemini", "claude", "openai")
+PROVIDERS = ("gemini", "claude", "openai", "anajak")
 
 PROVIDER_LABELS = {
     "gemini": "Google Gemini",
     "claude": "Anthropic Claude",
     "openai": "OpenAI GPT",
+    "anajak": "Claude (Anajak proxy)",
 }
 
 DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash-lite",
     "claude": "claude-opus-4-8",
     "openai": "gpt-4o-mini",
+    "anajak": "claude-opus-4-8",
 }
 
 _DEFAULTS = {

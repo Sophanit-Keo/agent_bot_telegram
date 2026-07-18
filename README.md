@@ -12,7 +12,7 @@ provides AI-powered conversations.
 | **Schedule summary** | `planner.build_summary()` produces a concise overview: events with times/locations, busy-hours total, holidays, Khmer lunar date, notes. |
 | **Complete daily plan** | `planner.generate_plan()` asks the selected AI for a morning-to-night plan (work blocks, meals, breaks, free time) around the fixed calendar events. If no AI key is configured, a built-in deterministic planner produces the plan instead, so the digest always works. |
 | **Automatic daily sending** | A scheduler inside the bot sends the digest (summary + plan) every day at the configured time (default **06:30**, `Asia/Phnom_Penh`) to every subscribed chat — no manual action needed. |
-| **Multi-LLM integration** | `llm.py` talks to **Google Gemini**, **Anthropic Claude** (official SDK) and **OpenAI GPT**, with multiple keys and automatic same-provider failover. |
+| **Multi-LLM integration** | `llm.py` talks to **Google Gemini**, **Anthropic Claude** (official SDK), **OpenAI GPT**, and **Claude via the Anajak proxy** (`anajak` — same Anthropic Messages API contract as a custom `ANTHROPIC_BASE_URL`, useful when direct Anthropic access isn't available), with multiple keys and automatic same-provider failover. |
 | **Keys managed via Telegram** | `/setkey`, `/delkey`, `/keys`, `/model`, `/setmodel` — each provider has an ordered key pool stored in `config.json` (git-ignored); the bot deletes messages containing raw keys when it can. |
 | **Chat with the selected AI** | Any plain text message is answered by the active provider in a natural, friendly tone, with per-chat conversation history (`/reset` clears it). The chat is **grounded in real data**: today's and tomorrow's calendar are injected into every request, so questions like *"am I free tomorrow afternoon?"* are answered from the actual schedule. |
 | **Long-term memory** | The bot remembers lasting facts across restarts (`memory.py` → `memory.json`). Facts are saved automatically when you mention them in chat (the AI tags them with `[REMEMBER: ...]`), or explicitly via `/remember`. Manage with `/memory` and `/forget`. |
@@ -49,6 +49,7 @@ provides AI-powered conversations.
    /setkey gemini  AIza-key-1 AIza-key-2  (from https://aistudio.google.com/apikey)
    /setkey claude  sk-ant-key-1            (from https://platform.claude.com)
    /setkey openai  sk-key-1 sk-key-2       (from https://platform.openai.com)
+   /setkey anajak  <api-key>               (Claude via the Anajak proxy)
    /model claude                  (choose the active provider)
    ```
    If a key is rejected, out of quota/rate-limited, or encounters a temporary
@@ -78,7 +79,7 @@ provides AI-powered conversations.
 | `/remember <fact>` | Save a fact to long-term memory |
 | `/memory` | List everything the bot remembers |
 | `/forget <n\|all>` | Forget one fact (by number) or everything |
-| `/model [provider]` | Show or switch the active AI (gemini / claude / openai) |
+| `/model [provider]` | Show or switch the active AI (gemini / claude / openai / anajak) |
 | `/setkey <provider> <key> [more-keys...]` | Add one or more keys to a provider's failover pool (use a private chat!) |
 | `/delkey <provider> <number\|all>` | Delete one numbered key (see `/keys`) or the complete pool |
 | `/keys` | List providers, numbered masked key pools, and models |

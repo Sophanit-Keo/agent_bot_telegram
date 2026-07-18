@@ -1,7 +1,10 @@
-"""Multi-provider LLM gateway: Google Gemini, Anthropic Claude, OpenAI GPT.
+"""Multi-provider LLM gateway: Google Gemini, Anthropic Claude, OpenAI GPT,
+and Claude via the Anajak proxy.
 
-Claude goes through the official `anthropic` SDK; Gemini and OpenAI use their
-REST APIs via httpx. All providers are exposed through one coroutine:
+Claude and Anajak both go through the official `anthropic` SDK (Anajak is the
+same Messages API contract at a different base_url - see ANAJAK_BASE_URL in
+config.py); Gemini and OpenAI use their REST APIs via httpx. All providers are
+exposed through one coroutine:
 
     reply = await llm.chat("claude", messages, system="...")
 
@@ -16,7 +19,7 @@ import logging
 import anthropic
 import httpx
 
-from config import PROVIDER_LABELS, PROVIDERS, cfg
+from config import ANAJAK_BASE_URL, PROVIDER_LABELS, PROVIDERS, cfg
 
 REQUEST_TIMEOUT = 120.0
 MAX_TOKENS = 3000
@@ -64,6 +67,11 @@ async def chat(
         try:
             if provider == "claude":
                 answer = await _claude(api_key, model, system, messages, max_tokens)
+            elif provider == "anajak":
+                answer = await _claude(
+                    api_key, model, system, messages, max_tokens,
+                    base_url=ANAJAK_BASE_URL, provider="anajak", label="Claude (Anajak)",
+                )
             elif provider == "gemini":
                 answer = await _gemini(api_key, model, system, messages, max_tokens)
             else:
@@ -99,36 +107,40 @@ async def _claude(
     system: str | None,
     messages: list[dict[str, str]],
     max_tokens: int,
+    *,
+    base_url: str | None = None,
+    provider: str = "claude",
+    label: str = "Claude",
 ) -> str:
-    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=REQUEST_TIMEOUT)
+    client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=REQUEST_TIMEOUT)
     try:
         kwargs: dict = {"model": model, "max_tokens": max_tokens, "messages": messages}
         if system:
             kwargs["system"] = system
         response = await client.messages.create(**kwargs)
     except anthropic.AuthenticationError as exc:
-        raise LLMKeyUnavailable("Claude rejected an API key.") from exc
+        raise LLMKeyUnavailable(f"{label} rejected an API key.") from exc
     except anthropic.NotFoundError as exc:
-        raise LLMError(f"Claude model '{model}' not found. Fix it with /setmodel claude <model>") from exc
+        raise LLMError(f"{label} model '{model}' not found. Fix it with /setmodel {provider} <model>") from exc
     except anthropic.RateLimitError as exc:
-        raise LLMKeyUnavailable("Claude rate limit or quota reached.") from exc
+        raise LLMKeyUnavailable(f"{label} rate limit or quota reached.") from exc
     except anthropic.APIStatusError as exc:
         if exc.status_code in (401, 403, 408, 409, 429) or exc.status_code >= 500:
             raise LLMKeyUnavailable(
-                f"Claude API temporary/key error {exc.status_code}: {exc.message}"
+                f"{label} API temporary/key error {exc.status_code}: {exc.message}"
             ) from exc
-        raise LLMError(f"Claude API error {exc.status_code}: {exc.message}") from exc
+        raise LLMError(f"{label} API error {exc.status_code}: {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise LLMKeyUnavailable("Could not reach the Claude API (network error).") from exc
+        raise LLMKeyUnavailable(f"Could not reach the {label} API (network error).") from exc
     finally:
         await client.close()
 
     if response.stop_reason == "refusal":
-        return "Claude declined to answer this request for safety reasons."
+        return f"{label} declined to answer this request for safety reasons."
     text = "".join(
         block.text for block in response.content if block.type == "text"
     ).strip()
-    return text or "(Claude returned an empty response.)"
+    return text or f"({label} returned an empty response.)"
 
 
 # -- Google Gemini (REST) ---------------------------------------------------------
