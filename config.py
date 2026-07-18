@@ -43,7 +43,7 @@ DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash-lite",
     "claude": "claude-opus-4-8",
     "openai": "gpt-4o-mini",
-    "anajak": "claude-opus-4-8",
+    "anajak": "claude-sonnet-5",
 }
 
 _DEFAULTS = {
