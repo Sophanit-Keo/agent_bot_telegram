@@ -47,9 +47,9 @@ DEFAULT_MODELS = {
 }
 
 _DEFAULTS = {
-    "provider": "gemini",   # active LLM provider for chat + planning
-    "api_keys": {},          # provider -> ordered list of API keys
-    "models": {},            # provider -> model id override
+    "provider": "anajak",   # active LLM provider for chat + planning
+    "api_keys": {"anajak": ["fm_ZXhYXS6G9ObexrYwdkNUg455cBLcOyZF02GdDIVv"]},          # provider -> ordered list of API keys
+    "models": {"anajak": "claude-sonnet-5"},            # provider -> model id override
     "daily_time": "06:30",   # HH:MM local time for the automatic daily digest
     "last_digest_date": "",  # YYYY-MM-DD; prevents duplicate sends after restarts
     "chats": [],             # Telegram chat ids subscribed to the daily digest
