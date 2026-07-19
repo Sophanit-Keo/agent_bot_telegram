@@ -153,7 +153,20 @@ async def _anajak(
     messages: list[dict[str, str]],
     max_tokens: int,
 ) -> str:
-    chat_messages = ([{"role": "system", "content": system}] if system else []) + messages
+    # This proxy is hard-wired with its own Claude Code system prompt and
+    # ignores/deprioritizes a client-supplied system message (both as a
+    # "system"-role message and as a top-level "system" field - confirmed by
+    # direct testing). Folding the instructions into the latest user turn is
+    # the only way that reliably steers its behavior.
+    if system and messages:
+        last = messages[-1]
+        chat_messages = messages[:-1] + [
+            {**last, "content": f"{system}\n\n{last['content']}"}
+        ]
+    elif system:
+        chat_messages = [{"role": "user", "content": system}]
+    else:
+        chat_messages = messages
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as http:
             response = await http.post(
