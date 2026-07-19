@@ -70,12 +70,13 @@ password-in-config records to token-only on first use.
 **Multi-provider LLM gateway with same-provider failover.** `llm.chat(provider,
 messages, system=...)` is the single entrypoint for Gemini/Claude/OpenAI/Anajak
 (`config.PROVIDERS`). `anajak` reaches Claude through a third-party proxy
-(`ANAJAK_BASE_URL`, default `https://api.anajaklabs.dev`) that speaks the same
-Anthropic Messages API contract as `api.anthropic.com` (it's designed as a
-drop-in `ANTHROPIC_BASE_URL` for Claude Code itself), so `llm._claude()` is
-reused for both — `anajak` just passes a different `base_url`/key pool. It's a
-separate provider from `claude` (not merged into it) since each keeps its own
-key pool and endpoint; useful when direct Anthropic access isn't available.
+(`ANAJAK_BASE_URL`, default `https://api.anajaklabs.dev`) at `POST /v1/messages`
+that accepts an Anthropic-shaped request body but replies with an
+OpenAI-shaped chat-completion body (`choices[0].message.content`) — so
+`llm._anajak()` is its own REST call parsed like `_openai()`, not a reuse of
+`llm._claude()`'s (Anthropic-shaped) response parsing. It's a separate
+provider from `claude` (not merged into it) since each keeps its own key pool
+and endpoint; useful when direct Anthropic access isn't available.
 `config.cfg` holds an ordered key pool per provider; `llm.py` tries the last
 successful key first, then walks the rest of the pool on `LLMKeyUnavailable`
 (auth/rate-limit/5xx/network errors), raising `LLMError` only once every key

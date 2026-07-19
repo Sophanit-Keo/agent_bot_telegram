@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -195,6 +195,26 @@ async def _typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 
+@asynccontextmanager
+async def _typing_keepalive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-send the "typing…" action every few seconds for the duration of the
+    block, since Telegram clears it after ~5s and a slow LLM call would
+    otherwise leave the chat looking stalled."""
+
+    async def _loop() -> None:
+        while True:
+            await _typing(update, context)
+            await asyncio.sleep(4)
+
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 async def _require_private_chat(
     update: Update, context: ContextTypes.DEFAULT_TYPE, contains_secret: bool = False
 ) -> bool:
@@ -307,7 +327,8 @@ async def _send_calendar_view(
             update, planner.build_summary(day, for_date, user_name, lang), ParseMode.HTML
         )
     elif mode == "plan":
-        plan, source = await planner.generate_plan(day, for_date, user_name, lang)
+        async with _typing_keepalive(update, context):
+            plan, source = await planner.generate_plan(day, for_date, user_name, lang)
         note = tr(lang, "planned_by", source=source) if source else tr(lang, "auto_plan")
         who = f"{html.escape(user_name)} — " if user_name else ""
         header = tr(
@@ -1063,7 +1084,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         language_rule=language_rule,
     )
     try:
-        answer = await llm.chat(cfg.provider, list(history), system=system)
+        async with _typing_keepalive(update, context):
+            answer = await llm.chat(cfg.provider, list(history), system=system)
     except llm.LLMNotConfigured as exc:
         history.pop()
         await _reply(update, f"🔑 {exc}")

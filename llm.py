@@ -1,9 +1,11 @@
 """Multi-provider LLM gateway: Google Gemini, Anthropic Claude, OpenAI GPT,
 and Claude via the Anajak proxy.
 
-Claude and Anajak both go through the official `anthropic` SDK (Anajak is the
-same Messages API contract at a different base_url - see ANAJAK_BASE_URL in
-config.py); Gemini and OpenAI use their REST APIs via httpx. All providers are
+Claude goes through the official `anthropic` SDK. Anajak (ANAJAK_BASE_URL in
+config.py) takes an Anthropic-shaped request body at POST /v1/messages but
+replies with an OpenAI-shaped chat-completion body, so it gets its own REST
+call via httpx rather than reusing the anthropic SDK's response parsing.
+Gemini and OpenAI also use their REST APIs via httpx. All providers are
 exposed through one coroutine:
 
     reply = await llm.chat("claude", messages, system="...")
@@ -68,10 +70,7 @@ async def chat(
             if provider == "claude":
                 answer = await _claude(api_key, model, system, messages, max_tokens)
             elif provider == "anajak":
-                answer = await _claude(
-                    api_key, model, system, messages, max_tokens,
-                    base_url=ANAJAK_BASE_URL, provider="anajak", label="Claude (Anajak)",
-                )
+                answer = await _anajak(api_key, model, system, messages, max_tokens)
             elif provider == "gemini":
                 answer = await _gemini(api_key, model, system, messages, max_tokens)
             else:
@@ -107,40 +106,83 @@ async def _claude(
     system: str | None,
     messages: list[dict[str, str]],
     max_tokens: int,
-    *,
-    base_url: str | None = None,
-    provider: str = "claude",
-    label: str = "Claude",
 ) -> str:
-    client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=REQUEST_TIMEOUT)
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=REQUEST_TIMEOUT)
     try:
         kwargs: dict = {"model": model, "max_tokens": max_tokens, "messages": messages}
         if system:
             kwargs["system"] = system
         response = await client.messages.create(**kwargs)
     except anthropic.AuthenticationError as exc:
-        raise LLMKeyUnavailable(f"{label} rejected an API key.") from exc
+        raise LLMKeyUnavailable("Claude rejected an API key.") from exc
     except anthropic.NotFoundError as exc:
-        raise LLMError(f"{label} model '{model}' not found. Fix it with /setmodel {provider} <model>") from exc
+        raise LLMError(f"Claude model '{model}' not found. Fix it with /setmodel claude <model>") from exc
     except anthropic.RateLimitError as exc:
-        raise LLMKeyUnavailable(f"{label} rate limit or quota reached.") from exc
+        raise LLMKeyUnavailable("Claude rate limit or quota reached.") from exc
     except anthropic.APIStatusError as exc:
         if exc.status_code in (401, 403, 408, 409, 429) or exc.status_code >= 500:
             raise LLMKeyUnavailable(
-                f"{label} API temporary/key error {exc.status_code}: {exc.message}"
+                f"Claude API temporary/key error {exc.status_code}: {exc.message}"
             ) from exc
-        raise LLMError(f"{label} API error {exc.status_code}: {exc.message}") from exc
+        raise LLMError(f"Claude API error {exc.status_code}: {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise LLMKeyUnavailable(f"Could not reach the {label} API (network error).") from exc
+        raise LLMKeyUnavailable("Could not reach the Claude API (network error).") from exc
     finally:
         await client.close()
 
     if response.stop_reason == "refusal":
-        return f"{label} declined to answer this request for safety reasons."
+        return "Claude declined to answer this request for safety reasons."
+    if not response.content:
+        raise LLMKeyUnavailable(f"Claude returned no content (stop_reason={response.stop_reason}).")
     text = "".join(
         block.text for block in response.content if block.type == "text"
     ).strip()
-    return text or f"({label} returned an empty response.)"
+    return text or "(Claude returned an empty response.)"
+
+
+# -- Claude via the Anajak proxy (REST) --------------------------------------------
+# Anthropic-shaped request body at POST /v1/messages, but an OpenAI-shaped
+# chat-completion response - so this parses like _openai() rather than
+# reusing the anthropic SDK's (Anthropic-shaped) response parsing.
+
+
+async def _anajak(
+    api_key: str,
+    model: str,
+    system: str | None,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+) -> str:
+    chat_messages = ([{"role": "system", "content": system}] if system else []) + messages
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as http:
+            response = await http.post(
+                f"{ANAJAK_BASE_URL}/v1/messages",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "max_tokens": max_tokens, "messages": chat_messages},
+            )
+    except httpx.HTTPError as exc:
+        raise LLMKeyUnavailable("Could not reach the Anajak API (network error).") from exc
+
+    if response.status_code in (401, 403):
+        raise LLMKeyUnavailable("Anajak rejected an API key.")
+    if response.status_code == 404:
+        raise LLMError(f"Anajak model '{model}' not found. Fix it with /setmodel anajak <model>")
+    if response.status_code == 429:
+        raise LLMKeyUnavailable("Anajak rate limit or quota reached.")
+    if response.status_code in (408, 409) or response.status_code >= 500:
+        raise LLMKeyUnavailable(
+            f"Anajak API temporary error {response.status_code}: {response.text[:300]}"
+        )
+    if response.status_code != 200:
+        raise LLMError(f"Anajak API error {response.status_code}: {response.text[:300]}")
+
+    data = response.json()
+    try:
+        text = (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        raise LLMError(f"Anajak returned an unexpected response: {str(data)[:300]}")
+    return text or "(Anajak returned an empty response.)"
 
 
 # -- Google Gemini (REST) ---------------------------------------------------------
