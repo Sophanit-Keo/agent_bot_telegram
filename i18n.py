@@ -243,6 +243,11 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "notes_header": {"en": "📝 <b>Notes</b>", "km": "📝 <b>កំណត់ចំណាំ</b>"},
+    "coworkers_header": {
+        "en": "👥 <b>Working with you today</b> — {shift}",
+        "km": "👥 <b>អ្នកនឹងធ្វើការជាមួយថ្ងៃនេះ</b> — {shift}",
+    },
+    "coworkers_ungrouped": {"en": "Unassigned", "km": "មិនកំណត់ក្រុម"},
     "digest_plan": {
         "en": "🗒 <b>Daily plan</b> <i>({note})</i>",
         "km": "🗒 <b>ផែនការប្រចាំថ្ងៃ</b> <i>({note})</i>",

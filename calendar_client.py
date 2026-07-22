@@ -249,6 +249,18 @@ class CalendarClient:
             raise CalendarError("Calendar API returned invalid work-schedule data")
         return [item for item in result if isinstance(item, dict)]
 
+    async def work_schedule_today(
+        self, date_str: str, chat_id: int | None = None
+    ) -> dict[str, Any]:
+        """Everyone with a shift assigned on one date, grouped by shift template
+        (includes the signed-in user alongside their coworkers)."""
+        result = await self._request(
+            "GET", "/work-schedule/today", params={"date": date_str}, chat_id=chat_id
+        )
+        if not isinstance(result, dict):
+            raise CalendarError("Calendar API returned invalid work-schedule-today data")
+        return result
+
     # -- Write endpoints (dynamic user input) ------------------------------------------------
 
     async def create_event(

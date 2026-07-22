@@ -114,28 +114,61 @@ async def _cached_day(date_str: str, chat_id: int | None = None) -> dict:
     return day
 
 
-# Cached display name of each chat's signed-in calendar user.
-_user_names: dict[int, str] = {}
+# Cached /auth/me payload of each chat's signed-in calendar user.
+_user_info: dict[int, dict] = {}
 
 
-async def _account_name(chat_id: int) -> str | None:
-    if chat_id in _user_names:
-        return _user_names[chat_id]
+async def _account_info(chat_id: int) -> dict:
+    if chat_id in _user_info:
+        return _user_info[chat_id]
     try:
         me = await calendar.me(chat_id=chat_id)
     except CalendarError:
-        return None
-    name = str((me or {}).get("name") or "").strip()
-    if name:
-        _user_names[chat_id] = name
+        return {}
+    if me:
+        _user_info[chat_id] = me
+    return me or {}
+
+
+async def _account_name(chat_id: int) -> str | None:
+    name = str((await _account_info(chat_id)).get("name") or "").strip()
     return name or None
 
 
+# Short-lived cache of "who else is on shift today" rosters, keyed like _day_cache.
+_coworkers_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+async def _cached_coworkers(date_str: str, chat_id: int) -> dict | None:
+    key = f"{chat_id}:{date_str}"
+    hit = _coworkers_cache.get(key)
+    if hit and time.monotonic() - hit[0] < DAY_CACHE_TTL:
+        return hit[1]
+    try:
+        roster = await calendar.work_schedule_today(date_str, chat_id=chat_id)
+    except CalendarError:
+        roster = None
+    _coworkers_cache[key] = (time.monotonic(), roster)
+    return roster
+
+
+async def _coworkers_text(
+    chat_id: int, for_date: date, user_name: str | None, lang: str
+) -> str | None:
+    """HTML block naming who else is on the same shift today, or None when the
+    roster is unavailable or the signed-in user has no shift that day."""
+    info = await _account_info(chat_id)
+    roster = await _cached_coworkers(for_date.isoformat(), chat_id)
+    return planner.build_coworkers(roster, info.get("id"), user_name, lang)
+
+
 def _drop_day_cache(chat_id: int) -> None:
-    """Invalidate cached day payloads for a chat (after adding data / login)."""
+    """Invalidate cached day/coworkers payloads for a chat (after adding data / login)."""
     prefix = f"{chat_id}:"
     for key in [k for k in _day_cache if k.startswith(prefix)]:
         _day_cache.pop(key, None)
+    for key in [k for k in _coworkers_cache if k.startswith(prefix)]:
+        _coworkers_cache.pop(key, None)
 
 # Interface texts (help, sign-in prompt, labels) live in i18n.py in EN and KM.
 
@@ -265,7 +298,7 @@ async def auth_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     command = ""
     if text.startswith("/"):
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
-    if command in {"/start", "/login", "/register"}:
+    if command in {"/start", "/login", "/register", "/cancel"}:
         return
     if not command and cfg.get_login_flow(chat_id):
         return
@@ -322,10 +355,12 @@ async def _send_calendar_view(
     chat_id = update.effective_chat.id
     lang = cfg.get_language(chat_id)
     user_name = await _account_name(chat_id)
+    coworkers = await _coworkers_text(chat_id, for_date, user_name, lang)
     if mode == "summary":
-        await _reply(
-            update, planner.build_summary(day, for_date, user_name, lang), ParseMode.HTML
-        )
+        text = planner.build_summary(day, for_date, user_name, lang)
+        if coworkers:
+            text += "\n\n" + coworkers
+        await _reply(update, text, ParseMode.HTML)
     elif mode == "plan":
         async with _typing_keepalive(update, context):
             plan, source = await planner.generate_plan(day, for_date, user_name, lang)
@@ -338,13 +373,15 @@ async def _send_calendar_view(
             date=for_date.strftime("%d %B %Y"),
             note=html.escape(note),
         )
-        await _reply(update, f"{header}\n{html.escape(plan)}", ParseMode.HTML)
+        text = f"{header}\n{html.escape(plan)}"
+        if coworkers:
+            text += "\n\n" + coworkers
+        await _reply(update, text, ParseMode.HTML)
     else:
-        await _reply(
-            update,
-            await planner.build_digest(day, for_date, user_name, lang),
-            ParseMode.HTML,
-        )
+        text = await planner.build_digest(day, for_date, user_name, lang)
+        if coworkers:
+            text += "\n\n" + coworkers
+        await _reply(update, text, ParseMode.HTML)
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -516,7 +553,7 @@ async def _complete_login(chat_id: int, email: str, password: str, bot) -> None:
     cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
     calendar.set_token(chat_id, token)
     _drop_day_cache(chat_id)
-    _user_names.pop(chat_id, None)
+    _user_info.pop(chat_id, None)
     await _set_command_menu(bot, chat_id, signed_in=True)
     await bot.send_message(
         chat_id,
@@ -607,7 +644,7 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     cfg.add_chat(chat_id)  # signed in -> subscribe to the daily digest
     calendar.set_token(chat_id, token)
     _drop_day_cache(chat_id)
-    _user_names[chat_id] = name
+    _user_info[chat_id] = {"name": name}
     await _set_command_menu(context.bot, chat_id, signed_in=True)
     await context.bot.send_message(
         chat_id,
@@ -623,7 +660,7 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     removed = cfg.remove_account(chat_id)
     calendar.drop_token(chat_id)
     _drop_day_cache(chat_id)
-    _user_names.pop(chat_id, None)
+    _user_info.pop(chat_id, None)
     cfg.clear_login_flow(chat_id)
     await _set_command_menu(context.bot, chat_id, signed_in=False)
     await _reply(
@@ -1122,9 +1159,11 @@ async def _broadcast_digest(app: Application) -> None:
         header = tr(lang, "digest_header")
         try:
             day = await calendar.day(today.isoformat(), chat_id=chat_id)
-            text = await planner.build_digest(
-                day, today, await _account_name(chat_id), lang
-            )
+            user_name = await _account_name(chat_id)
+            text = await planner.build_digest(day, today, user_name, lang)
+            coworkers = await _coworkers_text(chat_id, today, user_name, lang)
+            if coworkers:
+                text += "\n\n" + coworkers
         except CalendarError as exc:
             text = f"⚠️ Good morning! I could not load today's calendar: {html.escape(str(exc))}"
         try:

@@ -82,6 +82,74 @@ def _sorted_events(day: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(events, key=lambda e: str(e.get("starts_at") or ""))
 
 
+# -- coworkers on the same shift ------------------------------------------------
+
+
+def _roster_shift_label(template: dict[str, Any]) -> str:
+    """Human label for a /work-schedule/today shift template. Its start_time/
+    end_time are plain HH:MM strings shared by the whole shift block, unlike
+    _shift_label's per-day starts_at/ends_at ISO timestamps."""
+    name = template.get("name") or template.get("code") or "Shift"
+    start, end = template.get("start_time"), template.get("end_time")
+    return f"{name} {start}-{end}" if start and end else str(name)
+
+
+def _find_own_shift(
+    roster: dict[str, Any], self_id: Any, self_name: str | None
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """(shift_label, coworkers) for the shift the signed-in user is on today,
+    matched by id (preferred) or name; (None, []) when they have no shift."""
+    self_name = (self_name or "").strip().lower()
+    for entry in roster.get("shifts") or []:
+        if not isinstance(entry, dict):
+            continue
+        staff = [s for s in entry.get("staff") or [] if isinstance(s, dict)]
+        mine = next(
+            (
+                s for s in staff
+                if (self_id is not None and s.get("id") == self_id)
+                or (self_name and str(s.get("name") or "").strip().lower() == self_name)
+            ),
+            None,
+        )
+        if mine is None:
+            continue
+        template = entry.get("shift_template")
+        label = _roster_shift_label(template) if isinstance(template, dict) else "Shift"
+        return label, [s for s in staff if s is not mine]
+    return None, []
+
+
+def build_coworkers(
+    roster: dict[str, Any] | None,
+    self_id: Any,
+    self_name: str | None,
+    lang: str = "en",
+) -> str | None:
+    """HTML block naming who else is on the same shift today, grouped by team
+    when the roster tags staff with a group. None when the roster is
+    unavailable or the signed-in user has no shift scheduled for that date."""
+    if not roster:
+        return None
+    shift_label, mates = _find_own_shift(roster, self_id, self_name)
+    if shift_label is None or not mates:
+        return None
+    groups: dict[str, list[str]] = {}
+    for mate in mates:
+        name = str(mate.get("name") or "?").strip()
+        group = str(mate.get("group") or "").strip()
+        groups.setdefault(group, []).append(name)
+    lines = [tr(lang, "coworkers_header", shift=html.escape(shift_label))]
+    if len(groups) <= 1:
+        names = next(iter(groups.values()), [])
+        lines.append("• " + ", ".join(html.escape(n) for n in names))
+    else:
+        for group, names in groups.items():
+            label = html.escape(group) if group else tr(lang, "coworkers_ungrouped")
+            lines.append(f"• <b>{label}:</b> " + ", ".join(html.escape(n) for n in names))
+    return "\n".join(lines)
+
+
 # -- schedule summary -----------------------------------------------------------
 
 
