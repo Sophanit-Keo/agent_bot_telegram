@@ -28,14 +28,30 @@ class MemoryStore:
         return [item["text"] for item in self._data.get(str(chat_id), [])]
 
     def add(self, chat_id: int, text: str) -> bool:
-        """Store one fact; returns False for duplicates/empty text."""
+        """Store one fact; returns False for duplicates/empty text.
+
+        A new fact that is wholly contained in an existing one (same info,
+        differently phrased) is a no-op. A new fact that wholly contains an
+        existing one (a more detailed restatement, e.g. "I study at IT STEP"
+        -> "I study Computer Science at IT STEP") replaces it in place rather
+        than being appended as a near-duplicate entry, so the MAX_PER_CHAT
+        cap isn't wasted on repeated versions of the same fact.
+        """
         text = " ".join(text.split()).strip()
         if not text:
             return False
+        needle = text.lower()
         with self._lock:
             items = self._data.setdefault(str(chat_id), [])
-            if any(item["text"].lower() == text.lower() for item in items):
-                return False
+            for item in items:
+                existing = item["text"].lower()
+                if existing == needle or needle in existing:
+                    return False
+                if existing in needle:
+                    item["text"] = text
+                    item["saved_at"] = datetime.now().isoformat(timespec="seconds")
+                    self._save()
+                    return True
             items.append({"text": text, "saved_at": datetime.now().isoformat(timespec="seconds")})
             del items[:-MAX_PER_CHAT]  # keep only the newest MAX_PER_CHAT facts
             self._save()

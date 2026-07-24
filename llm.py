@@ -86,6 +86,19 @@ async def chat(
                     exc,
                 )
             continue
+        except LLMError:
+            raise
+        except Exception as exc:  # unexpected provider/network/parsing failure
+            last_error = LLMKeyUnavailable(f"unexpected error: {exc}")
+            logger.warning(
+                "%s key %d/%d raised an unexpected error (%s); trying the next key",
+                PROVIDER_LABELS[provider],
+                position,
+                len(api_keys),
+                exc,
+                exc_info=True,
+            )
+            continue
         _preferred_keys[provider] = api_key
         return answer
 
@@ -190,7 +203,10 @@ async def _anajak(
     if response.status_code != 200:
         raise LLMError(f"Anajak API error {response.status_code}: {response.text[:300]}")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise LLMKeyUnavailable(f"Anajak returned a non-JSON response: {response.text[:300]}")
     try:
         text = (data["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
@@ -251,7 +267,10 @@ async def _gemini(
     if response.status_code != 200:
         raise LLMError(f"Gemini API error {response.status_code}: {response.text[:300]}")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise LLMKeyUnavailable(f"Gemini returned a non-JSON response: {response.text[:300]}")
     try:
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(part.get("text", "") for part in parts).strip()
@@ -301,7 +320,10 @@ async def _openai(
     if response.status_code != 200:
         raise LLMError(f"OpenAI API error {response.status_code}: {response.text[:300]}")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise LLMKeyUnavailable(f"OpenAI returned a non-JSON response: {response.text[:300]}")
     try:
         text = (data["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
